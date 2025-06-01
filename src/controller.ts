@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { AuthRequest,  User } from "./types";
+import { AuthRequest, User } from "./types";
 import { decryptPassword, hashPasswordFn } from "./utils";
 import { prisma } from "./prisma";
 import jwt from "jsonwebtoken";
@@ -37,7 +37,7 @@ export async function createUser(req: Request, res: Response) {
       // 201 Created for successful user creation
       type: "success",
       message: "Successfully created user",
-    } );
+    });
     return;
   } catch (error) {
     console.error(error);
@@ -265,23 +265,26 @@ export const getMessages = async (
   res: Response
 ) => {
   try {
-    console.log("here");
-
     const senderId = Number(req.params.senderId);
-    const recieversid = req.userId;
-    console.log(typeof senderId, recieversid, "ids");
-    const resSender = await prisma.message.findMany({
-      where: { senderId: senderId },
+    const receiverId = req.userId;
+
+    // Get messages either sent or received between the two users
+    const messages = await prisma.message.findMany({
+      where: {
+        OR: [
+          { senderId, receiverId },
+          { senderId: receiverId, receiverId: senderId },
+        ],
+      },
+      orderBy: { createdAt: "asc" }, // Optional: sort by time
     });
-    const resReciver = await prisma.message.findMany({
-      where: { receiverId: recieversid },
-    });
-    console.log(resSender);
-    console.log(resReciver);
-    res
-      .status(200)
-      .json({ senderMesssage: resSender, RecieverMessages: resReciver });
+    if (!messages) {
+      res.status(401).json({message:"Messages not found"})
+    }
+
+    res.status(200).json({ messages });
   } catch (error) {
-    console.log(error);
+    console.error(error);
+    res.status(500).json({ error: "Failed to fetch messages" });
   }
 };

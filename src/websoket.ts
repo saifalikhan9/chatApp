@@ -1,15 +1,16 @@
-import { Server } from "ws";
+import { Server, WebSocket } from "ws";
 import type { Server as HTTPServer } from "http";
 import { prisma } from "./prisma";
-
-import { PrismaClientUnknownRequestError } from "@prisma/client/runtime/library";
 import jwt from "jsonwebtoken";
+import { PrismaClientUnknownRequestError } from "@prisma/client/runtime/library";
+
+// Map to store userId -> socket
+const userSockets = new Map<number, WebSocket>();
 
 export function setupWebSocket(server: HTTPServer) {
   const wss = new Server({ server });
 
   wss.on("connection", (socket, req) => {
-    // Extract the token from the query parameters
     const url = new URL(req.url || "", `http://${req.headers.host}`);
     const token = url.searchParams.get("token");
 
@@ -20,16 +21,20 @@ export function setupWebSocket(server: HTTPServer) {
           message: "Access denied. No token provided.",
         })
       );
-      socket.close(1008, "Access denied. No token provided."); // Close the connection
+      socket.close(1008, "Access denied. No token provided.");
       return;
     }
 
+    let userId: number;
+
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY || "");
-      console.log("🔑 Authenticated user:", decoded);
+      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY || "") as { userId: number };
+      userId = decoded.userId;
+      userSockets.set(userId, socket);
+      console.log("🔑 Authenticated user:", userId);
     } catch (error) {
       socket.send(JSON.stringify({ type: "error", message: "Unauthorized" }));
-      socket.close(1008, "Unauthorized"); // Close the connection
+      socket.close(1008, "Unauthorized");
       return;
     }
 
@@ -39,8 +44,7 @@ export function setupWebSocket(server: HTTPServer) {
       let parsed;
       try {
         parsed = JSON.parse(data.toString());
-        console.log(parsed,"parsed");
-        
+        console.log(parsed, "parsed");
       } catch {
         return socket.send(
           JSON.stringify({
@@ -57,10 +61,20 @@ export function setupWebSocket(server: HTTPServer) {
             const message = await prisma.message.create({
               data: { text, senderId, receiverId },
             });
-            broadcast(wss, {
-              type: "message:created",
-              payload: message,
-            });
+
+            const receiverSocket = userSockets.get(receiverId);
+            if (receiverSocket && receiverSocket.readyState === receiverSocket.OPEN) {
+              receiverSocket.send(JSON.stringify({ type: "message:created", payload: message }));
+            }
+
+            const senderSocket = userSockets.get(senderId);
+            if (
+              senderSocket &&
+              senderSocket.readyState === senderSocket.OPEN &&
+              senderId !== receiverId
+            ) {
+              senderSocket.send(JSON.stringify({ type: "message:created", payload: message }));
+            }
           } catch (err) {
             console.error("💥 Create error:", err);
             const msg =
@@ -79,7 +93,9 @@ export function setupWebSocket(server: HTTPServer) {
               where: { id },
               data: { text: newText },
             });
-            broadcast(wss, {
+
+            // Optionally: Notify both sender and receiver
+            broadcastToInvolved(updated.senderId, updated.receiverId, {
               type: "message:updated",
               payload: updated,
             });
@@ -97,8 +113,9 @@ export function setupWebSocket(server: HTTPServer) {
         case "message:delete": {
           try {
             const { id } = parsed.payload;
-            await prisma.message.delete({ where: { id } });
-            broadcast(wss, {
+            const deleted = await prisma.message.delete({ where: { id } });
+
+            broadcastToInvolved(deleted.senderId, deleted.receiverId, {
               type: "message:deleted",
               payload: { id },
             });
@@ -123,15 +140,26 @@ export function setupWebSocket(server: HTTPServer) {
       }
     });
 
-    socket.on("close", () => console.log("❌ Client disconnected"));
+    socket.on("close", () => {
+      console.log("❌ Client disconnected");
+      userSockets.delete(userId);
+    });
   });
 }
 
-// Broadcast helper
-function broadcast(wss: Server, message: any) {
-  wss.clients.forEach((client) => {
-    if (client.readyState === client.OPEN) {
-      client.send(JSON.stringify(message));
-    }
-  });
+// Send message only to sender and receiver
+function broadcastToInvolved(senderId: number, receiverId: number, message: any) {
+  const receiverSocket = userSockets.get(receiverId);
+  if (receiverSocket && receiverSocket.readyState === receiverSocket.OPEN) {
+    receiverSocket.send(JSON.stringify(message));
+  }
+
+  const senderSocket = userSockets.get(senderId);
+  if (
+    senderSocket &&
+    senderSocket.readyState === senderSocket.OPEN &&
+    senderId !== receiverId
+  ) {
+    senderSocket.send(JSON.stringify(message));
+  }
 }

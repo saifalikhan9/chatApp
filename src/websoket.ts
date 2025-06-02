@@ -117,7 +117,7 @@ export function setupWebSocket(server: HTTPServer) {
 
             broadcastToInvolved(deleted.senderId, deleted.receiverId, {
               type: "message:deleted",
-              payload: { id },
+              payload: deleted,
             });
           } catch (err) {
             console.error("💥 Delete error:", err);

@@ -1,4 +1,5 @@
 import { PrismaClient } from "@prisma/client";
+import { config } from "./lib/config";
 
 
 declare global {
@@ -10,4 +11,4 @@ declare global {
 // prevent multiple instances in dev
 export const prisma = global.prisma ?? new PrismaClient();
 
-if (process.env.NODE_ENV === "development") global.prisma = prisma;
+if (config.NODE_ENV === "development") global.prisma = prisma;

@@ -1,11 +1,12 @@
 import { Server, WebSocket } from "ws";
 import type { Server as HTTPServer } from "http";
-import { prisma } from "./prisma";
+import { prisma } from "../prisma";
 import jwt from "jsonwebtoken";
 import { PrismaClientUnknownRequestError } from "@prisma/client/runtime/library";
+import { config } from "./config";
 
 // Map to store userId -> socket
-const userSockets = new Map<number, WebSocket>();
+const userSockets = new Map<string, WebSocket>();
 
 export function setupWebSocket(server: HTTPServer) {
   const wss = new Server({ server });
@@ -25,10 +26,12 @@ export function setupWebSocket(server: HTTPServer) {
       return;
     }
 
-    let userId: number;
+    let userId: string;
 
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET_KEY || "") as { userId: number };
+      const decoded = jwt.verify(token, config.JWT_SECRET_ACCESS_TOKEN) as {
+        userId: string;
+      };
       userId = decoded.userId;
       userSockets.set(userId, socket);
       console.log("🔑 Authenticated user:", userId);
@@ -63,8 +66,13 @@ export function setupWebSocket(server: HTTPServer) {
             });
 
             const receiverSocket = userSockets.get(receiverId);
-            if (receiverSocket && receiverSocket.readyState === receiverSocket.OPEN) {
-              receiverSocket.send(JSON.stringify({ type: "message:created", payload: message }));
+            if (
+              receiverSocket &&
+              receiverSocket.readyState === receiverSocket.OPEN
+            ) {
+              receiverSocket.send(
+                JSON.stringify({ type: "message:created", payload: message })
+              );
             }
 
             const senderSocket = userSockets.get(senderId);
@@ -73,7 +81,9 @@ export function setupWebSocket(server: HTTPServer) {
               senderSocket.readyState === senderSocket.OPEN &&
               senderId !== receiverId
             ) {
-              senderSocket.send(JSON.stringify({ type: "message:created", payload: message }));
+              senderSocket.send(
+                JSON.stringify({ type: "message:created", payload: message })
+              );
             }
           } catch (err) {
             console.error("💥 Create error:", err);
@@ -129,6 +139,36 @@ export function setupWebSocket(server: HTTPServer) {
           }
           break;
         }
+        case "message:read": {
+          try {
+            const { senderId, receiverId } = parsed.payload;
+            console.log(parsed,"payload");
+            
+
+            await prisma.message.updateMany({
+              where: {
+                senderId,
+                receiverId,
+                isRead: false,
+              },
+              data: {
+                isRead: true,
+              },
+            });
+            broadcastToInvolved(senderId, receiverId, {
+              type: "message:red",
+              payload: { senderId, receiverId },
+            });
+          } catch (err) {
+            console.error("💥 read error:", err);
+            const msg =
+              err instanceof PrismaClientUnknownRequestError
+                ? "Database request error"
+                : "Failed to read message";
+            socket.send(JSON.stringify({ type: "error", message: msg }));
+          }
+          break;
+        }
 
         default:
           socket.send(
@@ -148,7 +188,11 @@ export function setupWebSocket(server: HTTPServer) {
 }
 
 // Send message only to sender and receiver
-function broadcastToInvolved(senderId: number, receiverId: number, message: any) {
+function broadcastToInvolved(
+  senderId: string,
+  receiverId: string,
+  message: any
+) {
   const receiverSocket = userSockets.get(receiverId);
   if (receiverSocket && receiverSocket.readyState === receiverSocket.OPEN) {
     receiverSocket.send(JSON.stringify(message));

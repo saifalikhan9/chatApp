@@ -8,6 +8,7 @@ import {
   getUsers,
   login,
   logout,
+  getRecentChats
 } from "./controller";
 import { verifyToken } from "./middleware";
 
@@ -20,5 +21,6 @@ router.post("/addFriends", verifyToken, addFriend);
 router.get("/getFriends", verifyToken, getFriends);
 router.delete("/deleteFriend", verifyToken, deleteFriend);
 router.get("/getMessages/:senderId", verifyToken, getMessages);
+router.get("/recentChats/:userId", verifyToken, getRecentChats);
 
 export default router;

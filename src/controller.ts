@@ -1,14 +1,17 @@
 import { Request, Response } from "express";
-import { AuthRequest, User } from "./types";
-import { decryptPassword, hashPasswordFn } from "./utils";
+import { AuthRequest, User } from "./lib/types";
+import { decryptPassword, hashPasswordFn } from "./lib/utils";
 import { prisma } from "./prisma";
-import jwt from "jsonwebtoken";
+import { generateAccessToken, generateRefreshToken } from "./lib/jwt";
+import { config } from "./lib/config";
 
 export async function createUser(req: Request, res: Response) {
-  const { name, email, password }: User = req.body;
+  const { name, email, password } = req.body as Pick<
+    User,
+    "name" | "email" | "password"
+  >;
   if (!name || !email || !password) {
     res.status(400).json({
-      // 400 Bad Request for missing fields
       type: "error",
       message: "Fields are Missing",
       status: 400,
@@ -19,7 +22,6 @@ export async function createUser(req: Request, res: Response) {
 
   if (existingUser) {
     res.status(409).json({
-      // 409 Conflict for already registered user
       type: "error",
       status: 409,
       message: "User is already Registered",
@@ -34,7 +36,6 @@ export async function createUser(req: Request, res: Response) {
     });
     const { password: _, ...userSafe } = user;
     res.status(201).json({
-      // 201 Created for successful user creation
       type: "success",
       message: "Successfully created user",
     });
@@ -69,7 +70,6 @@ export async function login(req: Request, res: Response) {
     });
     if (!user) {
       res.status(404).json({
-        // 404 Not Found for non-existent user
         status: 404,
         type: "error",
         message: "User not found with this email",
@@ -80,7 +80,6 @@ export async function login(req: Request, res: Response) {
     const compare = await decryptPassword(password, user?.password);
     if (!compare) {
       res.status(401).json({
-        // 401 Unauthorized for incorrect password
         type: "error",
         message: "Incorrect Password",
         status: 401,
@@ -88,29 +87,44 @@ export async function login(req: Request, res: Response) {
       return;
     }
     const { password: _, ...userSafe } = user;
-    const token = jwt.sign(
-      { userId: user.id },
-      process.env.JWT_SECRET_KEY as string,
-      {
-        expiresIn: "1h",
-      }
-    );
-    if (!token) {
+
+    const accessToken = generateAccessToken(user.id);
+
+    const refreshToken = generateRefreshToken(user.id);
+
+    if (!accessToken || !refreshToken) {
       res.status(500).json({
-        // 500 Internal Server Error for token generation failure
         type: "error",
         status: 500,
         message: "Unable to generate Token",
       });
       return;
     }
+    await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        refreshToken,
+      },
+    });
+
+    res.cookie("refreshToken", refreshToken, {
+      httpOnly: true,
+      secure: config.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+    res.cookie("accessToken", accessToken, {
+      httpOnly: true,
+      secure: config.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+
     res.status(200).json({
-      // 200 OK for successful login
       type: "success",
       status: 200,
       message: "Logged in successfully",
-      data: userSafe,
-      token,
+      user: userSafe,
+      accessToken,
+      refreshToken,
     });
   } catch (error) {
     console.error(error);
@@ -124,13 +138,30 @@ export async function login(req: Request, res: Response) {
   }
 }
 
-export function logout(req: Request, res: Response) {
-  res.status(200).json({
-    // 200 OK for successful logout
-    type: "success",
-    status: 200,
-    message: "Logged out successfully",
-  });
+export async function logout(req: Request, res: Response) {
+  try {
+    const id = req.userId as string;
+    const refreshToken = req.cookies.refreshToken as string;
+    console.log(refreshToken, "refreshtoken");
+    if (refreshToken) {
+      await prisma.user.update({ where: { id }, data: { refreshToken: "" } });
+      console.log("refreshtoken deleted");
+    }
+    res.clearCookie("refreshToken", {
+      httpOnly: true,
+      secure: config.NODE_ENV === "production",
+      sameSite: "strict",
+    });
+    res.status(204).json({
+      type: "success",
+      message: "Logged out successfully",
+    });
+  } catch (error) {
+    res.status(500).json({
+      type: "error",
+      message: error || "internal server error",
+    });
+  }
 }
 
 export async function getUsers(req: AuthRequest, res: Response) {
@@ -141,7 +172,7 @@ export async function getUsers(req: AuthRequest, res: Response) {
       // 200 OK for successful retrieval of users
       type: "success",
       status: 200,
-      data: users,
+      users,
     });
     return;
   } catch (error) {
@@ -161,6 +192,8 @@ export const addFriend = async (
 ) => {
   const { friendEmail } = req.body;
   const userId = req.userId;
+  console.log(userId, "id");
+
   if (!userId) {
     res.status(404).json({ error: "userId not found" });
     return;
@@ -237,7 +270,7 @@ export const getFriends = async (req: AuthRequest, res: Response) => {
   }
 };
 export const deleteFriend = async (
-  req: AuthRequest<{ id: number }, {}>,
+  req: AuthRequest<{ id: string }, {}>,
   res: Response
 ) => {
   const userId = req.userId;
@@ -261,11 +294,11 @@ export const deleteFriend = async (
 };
 
 export const getMessages = async (
-  req: AuthRequest<{ userId: number }, { senderId: number }>,
+  req: AuthRequest<{}, { senderId: string }>,
   res: Response
 ) => {
   try {
-    const senderId = Number(req.params.senderId);
+    const senderId = req.params.senderId;
     const receiverId = req.userId;
 
     // Get messages either sent or received between the two users
@@ -279,12 +312,86 @@ export const getMessages = async (
       orderBy: { createdAt: "asc" }, // Optional: sort by time
     });
     if (!messages) {
-      res.status(401).json({message:"Messages not found"})
+      res.status(401).json({ message: "Messages not found" });
     }
 
     res.status(200).json({ messages });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "Failed to fetch messages" });
+  }
+};
+export const getRecentChats = async (
+  req: AuthRequest<{ userId: string }>,
+  res: Response
+) => {
+  const userId = req.params.userId;
+
+  if (!userId) {
+    res.status(400).json({ message: "User ID is required" });
+    return;
+  }
+
+  try {
+    // Step 1: Get all friend relations
+    const friends = await prisma.friend.findMany({
+      where: { userId },
+      include: {
+        friend: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
+      },
+    });
+
+    // Step 2: For each friend, find last message and unread count
+    const recentChats = await Promise.all(
+      friends.map(async (f) => {
+        const friendId = f.friend.id;
+
+        const lastMessage = await prisma.message.findFirst({
+          where: {
+            OR: [
+              { senderId: userId, receiverId: friendId },
+              { senderId: friendId, receiverId: userId },
+            ],
+          },
+          orderBy: {
+            createdAt: "desc",
+          },
+        });
+
+        const unreadCount = await prisma.message.count({
+          where: {
+            senderId: friendId,
+            receiverId: userId,
+            isRead: false,
+          },
+        });
+
+        return {
+          friendId,
+          name: f.friend.name,
+          lastMessage: lastMessage?.text ?? "No messages yet",
+          timestamp: lastMessage?.createdAt ?? null,
+          unreadCount,
+        };
+      })
+    );
+
+    res.status(200).json({
+      type: "success",
+      status: 200,
+      data: recentChats,
+    });
+  } catch (error) {
+    console.error("getRecentChats Error:", error);
+    res.status(500).json({
+      type: "error",
+      status: 500,
+      message: "Failed to fetch recent chats",
+    });
   }
 };

@@ -8,32 +8,34 @@ datasource db {
 }
 
 model User {
-  id                Int       @id @default(autoincrement())
-  email             String    @unique
-  name              String
-  password          String
-  sentMessages      Message[] @relation("SentMessages")
-  receivedMessages  Message[] @relation("ReceivedMessages")
-  friends           Friend[]  @relation("UserFriends")
-  friendOf          Friend[]  @relation("FriendOf")
-  createdAt         DateTime  @default(now())
-  updatedAt         DateTime  @updatedAt
+  id                String @id @default(uuid())
+  email            String    @unique 
+  name             String
+  password         String
+  refreshToken     String?
+  sentMessages     Message[] @relation("SentMessages")
+  receivedMessages Message[] @relation("ReceivedMessages")
+  friends          Friend[]  @relation("UserFriends")
+  friendOf         Friend[]  @relation("FriendOf")
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 }
 
 model Message {
   id         Int      @id @default(autoincrement())
   text       String
   sender     User     @relation("SentMessages", fields: [senderId], references: [id])
-  senderId   Int
+  senderId   String
   receiver   User     @relation("ReceivedMessages", fields: [receiverId], references: [id])
-  receiverId Int
+  receiverId String
+  isRead     Boolean  @default(false)
   createdAt  DateTime @default(now())
 }
 
 model Friend {
   id       Int  @id @default(autoincrement())
   user     User @relation("UserFriends", fields: [userId], references: [id])
-  userId   Int
+  userId   String
   friend   User @relation("FriendOf", fields: [friendId], references: [id])
-  friendId Int
+  friendId String
 }

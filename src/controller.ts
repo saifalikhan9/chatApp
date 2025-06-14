@@ -1,9 +1,15 @@
-import { Request, Response } from "express";
+import { NextFunction, Request, Response } from "express";
 import { AuthRequest, User } from "./lib/types";
 import { decryptPassword, hashPasswordFn } from "./lib/utils";
 import { prisma } from "./prisma";
-import { generateAccessToken, generateRefreshToken } from "./lib/jwt";
+import {
+  generateAccessToken,
+  generateRefreshToken,
+  verifyRefreshToken,
+} from "./lib/jwt";
 import { config } from "./lib/config";
+import { main } from "./lib/callAI";
+import jwt from "jsonwebtoken";
 
 export async function createUser(req: Request, res: Response) {
   const { name, email, password } = req.body as Pick<
@@ -52,7 +58,9 @@ export async function createUser(req: Request, res: Response) {
   }
 }
 
-export async function login(req: Request, res: Response) {
+export async function login(req: Request, res: Response, next: NextFunction) {
+  console.log("login");
+
   const { email, password } = req.body;
   if (!email || !password) {
     res.status(400).json({
@@ -88,9 +96,9 @@ export async function login(req: Request, res: Response) {
     }
     const { password: _, ...userSafe } = user;
 
-    const accessToken = generateAccessToken(user.id);
+    const accessToken = generateAccessToken(user);
 
-    const refreshToken = generateRefreshToken(user.id);
+    const refreshToken = generateRefreshToken(user);
 
     if (!accessToken || !refreshToken) {
       res.status(500).json({
@@ -138,38 +146,101 @@ export async function login(req: Request, res: Response) {
   }
 }
 
-export async function logout(req: Request, res: Response) {
+export const getMe = async (req: Request, res: Response) => {
+  try {
+    const id = req.userId;
+
+    const user = await prisma.user.findUnique({
+      where: { id },
+    });
+    if (!user) {
+      throw Error("user not found");
+    }
+    const { password: _, refreshToken: _a, ...userSafe } = user;
+    res.status(200).json({ user: userSafe });
+  } catch (err) {
+    res.status(401).json({ message: "Invalid token" });
+  }
+};
+
+export async function logout(req: Request, res: Response, next: NextFunction) {
   try {
     const id = req.userId as string;
+    console.log(id ,"from lgout");
+    
+
     const refreshToken = req.cookies.refreshToken as string;
-    console.log(refreshToken, "refreshtoken");
+
     if (refreshToken) {
       await prisma.user.update({ where: { id }, data: { refreshToken: "" } });
-      console.log("refreshtoken deleted");
+
+      res.clearCookie("refreshToken", {
+        httpOnly: true,
+        secure: config.NODE_ENV === "production",
+        sameSite: "strict",
+      });
+      res.clearCookie("accessToken", {
+        httpOnly: true,
+        secure: config.NODE_ENV === "production",
+        sameSite: "strict",
+      });
+      res.status(204).json({
+        type: "success",
+        message: "Logged out successfully",
+      });
     }
-    res.clearCookie("refreshToken", {
+  } catch (error) {
+    next(error);
+  }
+}
+
+export const generateToken = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  try {
+    const { refreshToken } = req.cookies;
+    console.log(refreshToken, "refresh token from generat e tokrenm");
+
+    if (!refreshToken) {
+      res
+        .status(400)
+        .json({ message: "Token Not found please Login to generate new one" });
+      return;
+    }
+    const { id, email } = verifyRefreshToken(refreshToken);
+    console.log(id, "decoded from generatingtoken accesstoken at 185 line");
+
+    if (!id) {
+      res.status(403).json({ message: "varification failed" });
+      return;
+    }
+
+    const accessToken = jwt.sign(
+      { id, email },
+      config.JWT_SECRET_ACCESS_TOKEN,
+      { expiresIn: config.ACCESS_TOKEN_EXPIRY }
+    );
+    res.cookie("accessToken", accessToken, {
       httpOnly: true,
       secure: config.NODE_ENV === "production",
       sameSite: "strict",
     });
-    res.status(204).json({
-      type: "success",
-      message: "Logged out successfully",
+    res.status(200).json({
+      message: "Token refreshed Succesfully",
     });
   } catch (error) {
-    res.status(500).json({
-      type: "error",
-      message: error || "internal server error",
-    });
+    console.log(error);
+    next(error);
   }
-}
+};
 
 export async function getUsers(req: AuthRequest, res: Response) {
   try {
     const users = await prisma.user.findMany({ omit: { password: true } });
 
     res.status(200).json({
-      // 200 OK for successful retrieval of users
       type: "success",
       status: 200,
       users,
@@ -245,7 +316,7 @@ export const addFriend = async (
     res.status(500).json({ error: "Internal server error" });
   }
 };
-export const getFriends = async (req: AuthRequest, res: Response) => {
+export const getFriends = async (req: Request, res: Response) => {
   const userId = req.userId;
   console.log(userId, "userid");
 
@@ -393,5 +464,41 @@ export const getRecentChats = async (
       status: 500,
       message: "Failed to fetch recent chats",
     });
+  }
+};
+
+export const getUnreadMessages = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
+  const userId = req.userId;
+
+  if (!userId) {
+    res.status(400).json({ message: "User ID is required" });
+    return;
+  }
+
+  try {
+    const unreadMessages = await prisma.message.findMany({
+      where: {
+        receiverId: userId,
+        isRead: false,
+      },
+      orderBy: { createdAt: "asc" },
+      include: { sender: true },
+    });
+
+    const context = unreadMessages
+      .map((msg) => `${msg.sender.name || "Unknown"}: ${msg.text}`)
+      .join("\n");
+    console.log(context, "context");
+
+    const aiResponse = await main(context);
+
+    res.json({ insights: aiResponse, context });
+  } catch (error) {
+    console.log(error);
+    next(error);
   }
 };

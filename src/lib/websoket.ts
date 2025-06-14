@@ -30,9 +30,9 @@ export function setupWebSocket(server: HTTPServer) {
 
     try {
       const decoded = jwt.verify(token, config.JWT_SECRET_ACCESS_TOKEN) as {
-        userId: string;
+        id: string;
       };
-      userId = decoded.userId;
+      userId = decoded.id;
       userSockets.set(userId, socket);
       console.log("🔑 Authenticated user:", userId);
     } catch (error) {
